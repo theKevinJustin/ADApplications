@@ -1,0 +1,2521 @@
+﻿<?xml version="1.0" encoding="utf-8"?><ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest>
+    <Identity>
+      <ID>AD.Applications.Customizations</ID>
+      <Version>1.0.1.5</Version>
+    </Identity>
+    <Name>AD Applications Customizations</Name>
+    <References>
+      <Reference Alias="Health">
+        <ID>System.Health.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="MSIL">
+        <ID>Microsoft.SystemCenter.InstanceGroup.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Performance">
+        <ID>System.Performance.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="SC">
+        <ID>Microsoft.SystemCenter.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="System">
+        <ID>System.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Windows">
+        <ID>Microsoft.Windows.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+    </References>
+  </Manifest>
+  <TypeDefinitions>
+    <EntityTypes>
+      <ClassTypes>
+        <ClassType ID="AD.Applications.Seed.Class" Accessibility="Public" Abstract="false" Base="Windows!Microsoft.Windows.LocalApplication" Hosted="true" Singleton="false" Extension="false" />
+	  </ClassTypes>
+    </EntityTypes>
+    <ModuleTypes>
+      <DataSourceModuleType ID="AD.Applications.CRL.Monitor.DataSource" Accessibility="Internal" Batching="false">
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="0" type="xsd:string" name="SyncTime" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+		  <OverrideableParameter ID="SyncTime" Selector="$Config/SyncTime$" ParameterType="string" />
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <SimpleReccuringSchedule>
+                    <Interval Unit="Seconds">$Config/IntervalSeconds$</Interval>
+					<SyncTime>$Config/SyncTime$</SyncTime>
+                  </SimpleReccuringSchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagTriggerOnlyProbe">
+                <ScriptName>AD.Applications.CRL.Monitor.DataSource.v1015.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script uses functions to check CRL's
+#
+#  Author:  Kevin Justin (CRL code courtesy of CE Jason Windisch)
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+$ScriptName = "AD.Applications.CRL.Monitor.DataSource.v1015.ps1"
+$EventID = "588"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+#
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+#Set the condition = bad.  This represents your script finding something wrong
+$strCondition = "Bad"
+
+$ScriptName
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather Proactive CRL alert check for date ($date).")
+
+$DSMessage = "Proactive DailyTasks CRL alert check for date ($date)."
+
+
+# Check CRL's for NG
+# Use common domain PowerShell functions, and add in NG CRL's to check validity
+
+Function Get-CRLTimeValidity {
+	# 
+	#.Synopsis
+	#Get CRL dates from file or raw data.
+	#.DESCRIPTION
+	#Get the CRL THIS and NEXT update times from a specified CRL.Validates NextUpdate has not expired.
+	#.Author Caleb Keene
+	#Version 1.0
+	#LastUpdated: 08/05/2016
+	#.EXAMPLE 
+	#Get-CRLValidityTime 'C:\temp\FILENAME.CRL'
+	#.EXAMPLE 
+	#Get-CRLValidityTime [byte[]]$CRLRAWDATA
+	#.INPUTS
+	#Cerificate Authority CRL file or byte array.
+	#.OUTPUTS 
+	#CAName, ThisUpdate, NextUpdate, isValid
+	#[CmdletBinding()]
+ 
+Param (
+	#CRL File or Raw Bytes - dont limit object
+	[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+	[Alias('File', 'ByteArray', 'RawData')]
+	$CRL 
+	)
+	process {
+		#Import the CRL file or byte array 
+		if (-not ($CRLBytes = Get-content $CRL -Encoding byte -ErrorAction SilentlyContinue)) {
+			write-verbose "CRL file not found...assuming CRL raw bytes."
+			try {
+			[byte[]]$CRLBytes = $CRL
+			}
+	 catch {
+				Write-Warning ("Invalid CRL format.Expecting valid .crl file or byte array: {0} " -f $_.exception.Message)
+				break
+			}
+		}
+
+
+	#set match strings
+	$OIDCommonName = " 06 03 55 04 03 "
+	$UTCTime = " 17 0D "
+ 
+	#convert crl bytes to hex string
+	$CRLHexString = ($CRLBytes | % { "{0:X2}" -f $_ }) -join " "
+
+	#get the relevent bytes using the match strings
+	$CNNameBytes = ($CRLHexString -split $OIDCommonName )[1] -split " " | % { [Convert]::ToByte("$_", 16) }
+	$ThisUpdateBytes = ($CRLHexString -split $UTCTime )[1] -split " " | % { [Convert]::ToByte("$_", 16) }
+	$NextUpdateBytes = (($CRLHexString -split $UTCTime )[2] -split " ")[0..12] | % { [Convert]::ToByte("$_",16) }
+
+	#convert data to readable values
+	$CAName = ($CNNameBytes[2..($CNNameBytes[1] + 1)] | % { [char]$_ }) -join ""
+	$ThisUpdate = [Management.ManagementDateTimeConverter]::ToDateTime(("20" + $(($ThisUpdateBytes | % { [char]$_ }) -join "" -replace "z")) + ".000000+000")
+	$NextUpdate = [Management.ManagementDateTimeConverter]::ToDateTime(("20" + $(($NextUpdateBytes | % { [char]$_ }) -join "" -replace "z")) + ".000000+000")
+
+	$isvalid = ($nextUpdate -gt (get-date))
+
+	[pscustomobject]@{
+		CAName = $CAName
+		ThisUpdate = $ThisUpdate 
+		NextUpdate = $NextUpdate 
+		isValid = $isvalid 
+		}
+	}
+}
+
+
+
+Function Get-CRLTimeExpiration {
+	# 
+	#.Synopsis
+	#Get CRL URL and Passes to Get-CRLTimeValidity then checks time until expiration.
+	#> 
+	#[CmdletBinding()]
+
+	Param
+	 (
+	 #CRL File or Raw Bytes - dont limit object
+	 [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+	 [Alias('Address', 'Addy', 'http')] 
+	$URL
+	 )
+
+	process {
+		#Try to download the CRL file 
+		try {
+		$CRLBytes = Invoke-WebRequest $URL -UseBasicParsing -ErrorAction stop
+		}
+		
+		catch {
+				 # Write-Host "Failed to download the file" -ForegroundColor Red
+				 # Write-Error -Exception $_.exception -Message "Failed to download the file"
+				 # Write-err ("Failed to download the file" -f $_.exception.message)
+				 Return $null
+				 break 
+		}
+
+	 #Call CRL Function
+	 $Response = Get-CRLTimeValidity $CRLBytes.Content
+
+	$Timespan = $Response.NextUpdate - ((Get-Date))
+	 Return $Timespan.Days
+	}
+}
+
+
+$CRLs = @()
+
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 2.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 3.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 11.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 12.crl"
+
+$strCondition = @()
+$NGCRLOutput = @()
+
+foreach ( $CRL in $CRLs )
+{
+	$SCOMVAR = Get-CRLTimeExpiration $CRL
+	# For Debug, remove comments #
+	#write-host $CRL
+	#write-host $SCOMVAR
+	
+	# Test
+	if ( $SCOMVAR -ne $null)
+		{
+		#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+		#$NGCRLOutput += "Success - $CRL - Number of days = $SCOMVAR"
+		#$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Success - $CRL - Number of days = $SCOMVAR")
+		#$strCondition += "Good"
+		# Debug (uncomment #if, and comment non to debug based on current values
+		$SCOMVAR
+		#if ( $SCOMVAR -gt 136 )
+		if ( $SCOMVAR -gt 60 )
+			{
+			#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+			$NGCRLOutput += "Expiration is greater than 60 days! Success - $CRL - Number of days = $SCOMVAR"
+			$momapi.LogScriptEvent($ScriptName,$EventID,0,"Expiration is greater than 60 days!`n Success - $CRL - Number of days = $SCOMVAR")
+			$strCondition += "Good"
+			}
+		#if ( $( $SCOMVAR -lt 135 ) -AND $( $SCOMVAR -gt 115) )
+		if ( $( $SCOMVAR -lt 60 ) )
+			{
+			#if ( $($SCOMVAR -lt 125 ) -AND $( $SCOMVAR -gt 115) )
+			if ( $( $SCOMVAR -lt 14) )
+				{
+				#write-host -ForegroundColor green "Expiration is less than 30 days before expiring! Success - $CRL - Number of days = $SCOMVAR"
+				$NGCRLOutput += "Expiration is less than 14 days before expiring! $CRL - Number of days = $SCOMVAR"
+				$momapi.LogScriptEvent($ScriptName,$EventID,2,"Expiration is less than 14 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+				$strCondition += "Bad"
+				}
+			if ( $( $SCOMVAR -lt 30 ) -AND $( $SCOMVAR -gt 14) )
+			#if ( $( $SCOMVAR -lt 129 ) -AND $( $SCOMVAR -gt 125) )
+				{
+				#write-host -ForegroundColor green "Expiration is less than 30 days before expiring! Success - $CRL - Number of days = $SCOMVAR"
+				$NGCRLOutput += "Expiration is less than 30 days before expiring! $CRL - Number of days = $SCOMVAR"
+				$momapi.LogScriptEvent($ScriptName,$EventID,1,"Expiration is less than 30 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+				$strCondition = +"Bad"
+				}
+			#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+			$NGCRLOutput += "Expiration is less than 60 days before expiring! $CRL - Number of days = $SCOMVAR"
+			$momapi.LogScriptEvent($ScriptName,$EventID,0,"Expiration is less than 60 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+			$strCondition += "Bad"
+			}
+		}
+
+	if ( $SCOMVAR -eq $null )
+	{
+	#write-host -ForegroundColor Red "Failed - $CRL - Number of days = $SCOMVAR"
+	$NGCRLOutput += "NULL URL's provided - CRL $($CRL) and SCOMVar 'Get-CRLTimeExpiration' NULL outputs"
+	$EventID = 589
+	$momapi.LogScriptEvent($ScriptName,$EventID,2,"NULL URL's provided - CRL $($CRL) and SCOMVar 'Get-CRLTimeExpiration' NULL outputs")
+	$strCondition += "Bad"
+	}
+}
+
+$NGCRLOutput = $NGCRLOutput | out-string
+
+# Log 
+$Summary = "$DSMessage `n `n$NGCRLOutput `n `nDisclaimer:  This daily summary report is to document the manual tasks used by NOSC to check AD and AD Replication health, Pending Reboot Report, Logical Disk errors,Expiring Certificates, Unhealthy Server/Agents, Unhealthy agent workflow/script alerts, and Servers in Maintenance Mode"
+
+$EventID
+$strCondition
+
+#Check the value of $strCondition
+if ( $($strCondition -like "Bad").Count -gt 0 )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,1,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+if ( $($strCondition -like "Good").Count -gt 0 )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+      <DataSourceModuleType ID="AD.Applications.CRL.Report.Script.Alert.Rule.Datasource" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <WeeklySchedule>
+                    <Windows>
+                      <Daily>
+                        <Start>09:08</Start>
+                        <End>09:30</End>
+                        <DaysOfWeekMask>62</DaysOfWeekMask>
+                      </Daily>
+                    </Windows>
+                  </WeeklySchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagProbe">
+                <ScriptName>AD.Applications.CRL.Report.Script.Alert.Rule.Datasource.v1015.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script to gather AD Applications CRL report data for AD Team
+#
+#  Author: Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+# ScriptName should be the same as the ID of the module that the script is contained in
+$ScriptName = "AD.Applications.CRL.Report.Script.Alert.Rule.Datasource.v1015.ps1"
+$EventID = "586"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+#
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+#Set the condition = bad.  This represents your script finding something wrong
+$strCondition = "Bad"
+
+$ScriptName
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather Proactive CRL alert check for date ($date).")
+
+$DSMessage = "Proactive DailyTasks CRL alert check for date ($date)."
+
+
+# Check CRL's for NG
+# Use common domain PowerShell functions, and add in NG CRL's to check validity
+
+Function Get-CRLTimeValidity {
+	# 
+	#.Synopsis
+	#Get CRL dates from file or raw data.
+	#.DESCRIPTION
+	#Get the CRL THIS and NEXT update times from a specified CRL.Validates NextUpdate has not expired.
+	#.Author   Caleb Keene
+	#Version 1.0
+	#LastUpdated: 08/05/2016
+	#.EXAMPLE 
+	#Get-CRLValidityTime 'C:\temp\FILENAME.CRL'
+	#.EXAMPLE 
+	#Get-CRLValidityTime [byte[]]$CRLRAWDATA
+	#.INPUTS
+	#Cerificate Authority CRL file or byte array.
+	#.OUTPUTS 
+	#CAName, ThisUpdate, NextUpdate, isValid
+	#[CmdletBinding()]
+ 
+Param (
+	#CRL File or Raw Bytes - dont limit object
+	[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+	[Alias('File', 'ByteArray', 'RawData')]
+	$CRL 
+	)
+	process {
+		#Import the CRL file or byte array 
+		if (-not ($CRLBytes = Get-content $CRL -Encoding byte -ErrorAction SilentlyContinue)) {
+			write-verbose "CRL file not found...assuming CRL raw bytes."
+			try {
+			[byte[]]$CRLBytes = $CRL
+			}
+	 catch {
+				Write-Warning ("Invalid CRL format.Expecting valid .crl file or byte array: {0} " -f $_.exception.Message)
+				break
+			}
+		}
+
+
+	#set match strings
+	$OIDCommonName = " 06 03 55 04 03 "
+	$UTCTime = " 17 0D "
+ 
+	#convert crl bytes to hex string
+	$CRLHexString = ($CRLBytes | % { "{0:X2}" -f $_ }) -join " "
+
+	#get the relevent bytes using the match strings
+	$CNNameBytes = ($CRLHexString -split $OIDCommonName )[1] -split " " | % { [Convert]::ToByte("$_", 16) }
+	$ThisUpdateBytes = ($CRLHexString -split $UTCTime )[1] -split " " | % { [Convert]::ToByte("$_", 16) }
+	$NextUpdateBytes = (($CRLHexString -split $UTCTime )[2] -split " ")[0..12] | % { [Convert]::ToByte("$_",16) }
+
+	#convert data to readable values
+	$CAName = ($CNNameBytes[2..($CNNameBytes[1] + 1)] | % { [char]$_ }) -join ""
+	$ThisUpdate = [Management.ManagementDateTimeConverter]::ToDateTime(("20" + $(($ThisUpdateBytes | % { [char]$_ }) -join "" -replace "z")) + ".000000+000")
+	$NextUpdate = [Management.ManagementDateTimeConverter]::ToDateTime(("20" + $(($NextUpdateBytes | % { [char]$_ }) -join "" -replace "z")) + ".000000+000")
+
+	$isvalid = ($nextUpdate -gt (get-date))
+
+	[pscustomobject]@{
+		CAName = $CAName
+		ThisUpdate = $ThisUpdate 
+		NextUpdate = $NextUpdate 
+		isValid = $isvalid 
+		}
+	}
+}
+
+
+
+Function Get-CRLTimeExpiration {
+	# 
+	#.Synopsis
+	#Get CRL URL and Passes to Get-CRLTimeValidity then checks time until expiration.
+	#> 
+	#[CmdletBinding()]
+
+	Param
+	 (
+	 #CRL File or Raw Bytes - dont limit object
+	 [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+	 [Alias('Address', 'Addy', 'http')] 
+	$URL
+	 )
+
+	process {
+		#Try to download the CRL file 
+		try {
+		$CRLBytes = Invoke-WebRequest $URL -UseBasicParsing -ErrorAction stop
+		}
+		
+		catch {
+				 # Write-Host "Failed to download the file" -ForegroundColor Red
+				 # Write-Error -Exception $_.exception -Message "Failed to download the file"
+				 # Write-err ("Failed to download the file" -f $_.exception.message)
+				 Return $null
+				 break 
+		}
+
+	 #Call CRL Function
+	 $Response = Get-CRLTimeValidity $CRLBytes.Content
+
+	$Timespan = $Response.NextUpdate - ((Get-Date))
+	 Return $Timespan.Days
+	}
+}
+
+
+$CRLs = @()
+
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 2.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 3.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 11.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 12.crl"
+
+$strCondition = @()
+$NGCRLOutput = @()
+
+foreach ( $CRL in $CRLs )
+{
+	$SCOMVAR = Get-CRLTimeExpiration $CRL
+	# For Debug, remove comments #
+	#write-host $CRL
+	#write-host $SCOMVAR
+	
+	# Test
+	if ( $SCOMVAR -ne $null)
+		{
+		#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+		#$NGCRLOutput += "Success - $CRL - Number of days = $SCOMVAR"
+		#$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Success - $CRL - Number of days = $SCOMVAR")
+		#$strCondition += "Good"
+		# Debug (uncomment #if, and comment non to debug based on current values
+		$SCOMVAR
+		#if ( $SCOMVAR -gt 136 )
+		if ( $SCOMVAR -gt 60 )
+			{
+			#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+			$NGCRLOutput += "Expiration is greater than 60 days! Success - $CRL - Number of days = $SCOMVAR"
+			$momapi.LogScriptEvent($ScriptName,$EventID,0,"Expiration is greater than 60 days!`n Success - $CRL - Number of days = $SCOMVAR")
+			$strCondition += "Good"
+			}
+		#if ( $( $SCOMVAR -lt 135 ) -AND $( $SCOMVAR -gt 115) )
+		if ( $( $SCOMVAR -lt 60 ) )
+			{
+			#if ( $($SCOMVAR -lt 125 ) -AND $( $SCOMVAR -gt 115) )
+			if ( $( $SCOMVAR -lt 14) )
+				{
+				#write-host -ForegroundColor green "Expiration is less than 30 days before expiring! Success - $CRL - Number of days = $SCOMVAR"
+				$NGCRLOutput += "Expiration is less than 14 days before expiring! $CRL - Number of days = $SCOMVAR"
+				$momapi.LogScriptEvent($ScriptName,$EventID,2,"Expiration is less than 14 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+				$strCondition += "Bad"
+				}
+			if ( $( $SCOMVAR -lt 30 ) -AND $( $SCOMVAR -gt 14) )
+			#if ( $( $SCOMVAR -lt 129 ) -AND $( $SCOMVAR -gt 125) )
+				{
+				#write-host -ForegroundColor green "Expiration is less than 30 days before expiring! Success - $CRL - Number of days = $SCOMVAR"
+				$NGCRLOutput += "Expiration is less than 30 days before expiring! $CRL - Number of days = $SCOMVAR"
+				$momapi.LogScriptEvent($ScriptName,$EventID,1,"Expiration is less than 30 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+				$strCondition = +"Bad"
+				}
+			#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+			$NGCRLOutput += "Expiration is less than 60 days before expiring! $CRL - Number of days = $SCOMVAR"
+			$momapi.LogScriptEvent($ScriptName,$EventID,0,"Expiration is less than 60 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+			$strCondition += "Bad"
+			}
+		}
+
+	if ( $SCOMVAR -eq $null )
+	{
+	#write-host -ForegroundColor Red "Failed - $CRL - Number of days = $SCOMVAR"
+	$NGCRLOutput += "NULL URL's provided - CRL $($CRL) and SCOMVar 'Get-CRLTimeExpiration' NULL outputs"
+	$EventID = 589
+	$momapi.LogScriptEvent($ScriptName,$EventID,2,"NULL URL's provided - CRL $($CRL) and SCOMVar 'Get-CRLTimeExpiration' NULL outputs")
+	$strCondition += "Bad"
+	}
+}
+
+$NGCRLOutput = $NGCRLOutput | out-string
+
+# Log 
+$Summary = "$DSMessage `n `n$NGCRLOutput `n `nDisclaimer:  This daily summary report is to document the manual tasks used by NOSC to check AD and AD Replication health, Pending Reboot Report, Logical Disk errors,Expiring Certificates, Unhealthy Server/Agents, Unhealthy agent workflow/script alerts, and Servers in Maintenance Mode"
+
+$EventID
+$strCondition
+
+#Check the value of $strCondition
+if ( $($strCondition -like "Bad").Count -gt 0 )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,1,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+if ( $($strCondition -like "Good").Count -gt 0 )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+</ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+
+      <DataSourceModuleType ID="AD.Applications.ADFS.WebRequest.Monitor.DataSource" Accessibility="Internal" Batching="false">
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="0" type="xsd:string" name="SyncTime" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+		  <OverrideableParameter ID="SyncTime" Selector="$Config/SyncTime$" ParameterType="string" />
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <SimpleReccuringSchedule>
+                    <Interval Unit="Seconds">$Config/IntervalSeconds$</Interval>
+					<SyncTime>$Config/SyncTime$</SyncTime>
+                  </SimpleReccuringSchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagTriggerOnlyProbe">
+                <ScriptName>AD.Applications.ADFS.WebRequest.Monitor.DataSource.v1015.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script uses functions to check ADFS WebRequests for functionality
+#
+#  Author:  Kevin Justin (WebRequest code courtesy of CE Jason Windisch)
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+$ScriptName = "AD.Applications.ADFS.WebRequest.Monitor.DataSource.v1015.ps1"
+$EventID = "597"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+#Set the condition = bad.  This represents your script finding something wrong
+$strCondition = "Bad"
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather Proactive ADFS WebRequest alert check for date ($date).")
+
+$DSMessage = "Proactive DailyTasks ADFS WebRequest alert check for date ($date)."
+
+$ADFSWebRequestTest = @()
+$ADFSServers = @()
+$strCondition  = @()
+
+$ADFSServers += "##ADFSServer1##"
+$ADFSServers += "##ADFSServer2##"
+
+foreach ( $server in $ADFSServers )
+	{
+	#$Request = Invoke-WebRequest -Uri https://1.2.3.4/adfs/ls/idpinitiatedsignon.aspx -Headers @{ host="##FederationFQDN##" }
+	$Request = Invoke-WebRequest -Uri https://$server/adfs/ls/idpinitiatedsignon.aspx -Headers @{ host="##FederationFQDN##" } -UseBasicParsing
+	$Request.BaseResponse.StatusCode
+	#$Request.Content
+	#$Request | Select *
+	$Request.StatusCode
+	$ADFSWebRequestTest += "Test to ($server)"
+	If ( $Request.Content -like "*Sign in to this site.*" -eq $true ) 
+		{
+		Write-host "Test to ($server) sign in successful"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) sign in successful"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in successful")
+		}
+	If ( ( $Request.Content -like "*Sign in to this site.*" -eq $true ) -AND ( $Request.StatusCode -eq "200" ) )
+		{
+		Write-host "Test to ($server) sign in successful, ($server) has http200 status"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) sign in successful, ($server) has http200 status"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in successful, ($server) has http200 status")
+		}
+	else
+		{
+		Write-host "Test to ($server) sign in NOT successful"
+		$strCondition += "Bad"
+		$ADFSWebRequestTest += "Test to ($server) sign in NOT successful"
+		$ADFSWebRequestTest += "----------------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in NOT successful")
+		}
+	If ( $Request.StatusCode -eq "200" )
+		{
+		Write-host "Test to ($server) URI check complete, http200 status"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) URI check complete, http200 status"
+		$ADFSWebRequestTest += "----------------------------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) URI check complete, http200 status")
+		}
+	else
+		{
+		Write-host "Test to ($server) URI check FAIL"
+		$strCondition += "Bad"
+		$ADFSWebRequestTest += "Test to ($server) URI check FAIL"
+		$ADFSWebRequestTest += "--------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) URI check FAIL")
+		}
+	}
+
+$ADFSWebRequestTest
+
+$ADFSWebRequestReport = $ADFSWebRequestTest | out-string
+
+
+# Audit for failures
+if ( $strCondition | ? { $_ -eq "Bad" } )
+	{
+	$strCondition = "Bad"
+	}
+if ( $strCondition | ? { $_ -eq "Good" } )
+	{
+	$strCondition = "Good"
+	}
+
+$strCondition
+
+
+# Log 
+$Summary = "$DSMessage `n `n$ADFSWebRequestReport `n `nDisclaimer:  This daily summary report is to document the manual tasks used by NOSC to check AD and AD Replication health, Pending Reboot Report, Logical Disk errors,Expiring Certificates, Unhealthy Server/Agents, Unhealthy agent workflow/script alerts, and Servers in Maintenance Mode"
+
+$Summary
+
+#Check the value of $strCondition
+if ( $strCondition -eq "Bad" )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+if ( $strCondition -eq "Good" )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+      <DataSourceModuleType ID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.Datasource" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <WeeklySchedule>
+                    <Windows>
+                      <Daily>
+                        <Start>09:10</Start>
+                        <End>09:40</End>
+                        <DaysOfWeekMask>62</DaysOfWeekMask>
+                      </Daily>
+                    </Windows>
+                  </WeeklySchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagProbe">
+                <ScriptName>AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.Datasource.v1015.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script to gather AD Applications WebRequest report data for AD Team
+#
+#  Author: Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+# ScriptName should be the same as the ID of the module that the script is contained in
+$ScriptName = "AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.Datasource.v1015.ps1"
+$EventID = "595"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+#Set the condition = bad.  This represents your script finding something wrong
+$strCondition = "Bad"
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather Proactive ADFS WebRequest alert check for date ($date).")
+
+$DSMessage = "Proactive DailyTasks ADFS WebRequest alert check for date ($date)."
+
+$ADFSWebRequestTest = @()
+$ADFSServers = @()
+$strCondition  = @()
+
+$ADFSServers += "##ADFSServer1##"
+$ADFSServers += "##ADFSServer2##"
+
+foreach ( $server in $ADFSServers )
+	{
+	#$Request = Invoke-WebRequest -Uri https://1.2.3.4/adfs/ls/idpinitiatedsignon.aspx -Headers @{ host="##FederationFQDN##" }
+	$Request = Invoke-WebRequest -Uri https://$server/adfs/ls/idpinitiatedsignon.aspx -Headers @{ host="##FederationFQDN##" } -UseBasicParsing
+	$Request.BaseResponse.StatusCode
+	#$Request.Content
+	#$Request | Select *
+	$Request.StatusCode
+	$ADFSWebRequestTest += "Test to ($server)"
+	If ( $Request.Content -like "*Sign in to this site.*" -eq $true ) 
+		{
+		Write-host "Test to ($server) sign in successful"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) sign in successful"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in successful")
+		}
+	If ( ( $Request.Content -like "*Sign in to this site.*" -eq $true ) -AND ( $Request.StatusCode -eq "200" ) )
+		{
+		Write-host "Test to ($server) sign in successful, ($server) has http200 status"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) sign in successful, ($server) has http200 status"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in successful, ($server) has http200 status")
+		}
+	else
+		{
+		Write-host "Test to ($server) sign in NOT successful"
+		$strCondition += "Bad"
+		$ADFSWebRequestTest += "Test to ($server) sign in NOT successful"
+		$ADFSWebRequestTest += "----------------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in NOT successful")
+		}
+	If ( $Request.StatusCode -eq "200" )
+		{
+		Write-host "Test to ($server) URI check complete, http200 status"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) URI check complete, http200 status"
+		$ADFSWebRequestTest += "----------------------------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) URI check complete, http200 status")
+		}
+	else
+		{
+		Write-host "Test to ($server) URI check FAIL"
+		$strCondition += "Bad"
+		$ADFSWebRequestTest += "Test to ($server) URI check FAIL"
+		$ADFSWebRequestTest += "--------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) URI check FAIL")
+		}
+	}
+
+$ADFSWebRequestTest
+
+$ADFSWebRequestReport = $ADFSWebRequestTest | out-string
+
+
+# Audit for failures
+if ( $strCondition | ? { $_ -eq "Bad" } )
+	{
+	$strCondition = "Bad"
+	}
+if ( $strCondition | ? { $_ -eq "Good" } )
+	{
+	$strCondition = "Good"
+	}
+
+$strCondition
+
+
+# Log 
+$Summary = "$DSMessage `n `n$ADFSWebRequestReport `n `nDisclaimer:  This daily summary report is to document the manual tasks used by NOSC to check AD and AD Replication health, Pending Reboot Report, Logical Disk errors,Expiring Certificates, Unhealthy Server/Agents, Unhealthy agent workflow/script alerts, and Servers in Maintenance Mode"
+
+$Summary
+
+#Check the value of $strCondition
+if ( $strCondition -eq "Bad" )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+if ( $strCondition -eq "Good" )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+</ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+
+      <WriteActionModuleType ID="AD.Applications.CRL.Report.Script.Alert.Rule.WA" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <xsd:element minOccurs="1" name="TimeoutSeconds" type="xsd:integer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <WriteAction ID="PSWA" TypeID="Windows!Microsoft.Windows.PowerShellWriteAction">
+                <ScriptName>AD.Applications.CRL.Report.Script.Alert.Rule.WA.v1015.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script to gather NG AD CRL report data for AD Team
+#
+#  Author: Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+# ScriptName should be the same as the ID of the module that the script is contained in
+$ScriptName = "AD.Applications.CRL.Report.Script.Alert.Rule.WA.v1015.ps1"
+$EventID = "587"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+#
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+#Set the condition = bad.  This represents your script finding something wrong
+$strCondition = "Bad"
+
+$ScriptName
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather Proactive CRL alert check for date ($date).")
+
+$DSMessage = "Proactive DailyTasks CRL alert check for date ($date)."
+
+
+# Check CRL's for NG
+# Use common domain PowerShell functions, and add in NG CRL's to check validity
+
+Function Get-CRLTimeValidity {
+	# 
+	#.Synopsis
+	#Get CRL dates from file or raw data.
+	#.DESCRIPTION
+	#Get the CRL THIS and NEXT update times from a specified CRL.Validates NextUpdate has not expired.
+	#.Author Caleb Keene
+	#Version 1.0
+	#LastUpdated: 08/05/2016
+	#.EXAMPLE 
+	#Get-CRLValidityTime 'C:\temp\FILENAME.CRL'
+	#.EXAMPLE 
+	#Get-CRLValidityTime [byte[]]$CRLRAWDATA
+	#.INPUTS
+	#Cerificate Authority CRL file or byte array.
+	#.OUTPUTS 
+	#CAName, ThisUpdate, NextUpdate, isValid
+	#[CmdletBinding()]
+ 
+Param (
+	#CRL File or Raw Bytes - dont limit object
+	[Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+	[Alias('File', 'ByteArray', 'RawData')]
+	$CRL 
+	)
+	process {
+		#Import the CRL file or byte array 
+		if (-not ($CRLBytes = Get-content $CRL -Encoding byte -ErrorAction SilentlyContinue)) {
+			write-verbose "CRL file not found...assuming CRL raw bytes."
+			try {
+			[byte[]]$CRLBytes = $CRL
+			}
+	 catch {
+				Write-Warning ("Invalid CRL format.Expecting valid .crl file or byte array: {0} " -f $_.exception.Message)
+				break
+			}
+		}
+
+
+	#set match strings
+	$OIDCommonName = " 06 03 55 04 03 "
+	$UTCTime = " 17 0D "
+ 
+	#convert crl bytes to hex string
+	$CRLHexString = ($CRLBytes | % { "{0:X2}" -f $_ }) -join " "
+
+	#get the relevent bytes using the match strings
+	$CNNameBytes = ($CRLHexString -split $OIDCommonName )[1] -split " " | % { [Convert]::ToByte("$_", 16) }
+	$ThisUpdateBytes = ($CRLHexString -split $UTCTime )[1] -split " " | % { [Convert]::ToByte("$_", 16) }
+	$NextUpdateBytes = (($CRLHexString -split $UTCTime )[2] -split " ")[0..12] | % { [Convert]::ToByte("$_",16) }
+
+	#convert data to readable values
+	$CAName = ($CNNameBytes[2..($CNNameBytes[1] + 1)] | % { [char]$_ }) -join ""
+	$ThisUpdate = [Management.ManagementDateTimeConverter]::ToDateTime(("20" + $(($ThisUpdateBytes | % { [char]$_ }) -join "" -replace "z")) + ".000000+000")
+	$NextUpdate = [Management.ManagementDateTimeConverter]::ToDateTime(("20" + $(($NextUpdateBytes | % { [char]$_ }) -join "" -replace "z")) + ".000000+000")
+
+	$isvalid = ($nextUpdate -gt (get-date))
+
+	[pscustomobject]@{
+		CAName = $CAName
+		ThisUpdate = $ThisUpdate 
+		NextUpdate = $NextUpdate 
+		isValid = $isvalid 
+		}
+	}
+}
+
+
+
+Function Get-CRLTimeExpiration {
+	# 
+	#.Synopsis
+	#Get CRL URL and Passes to Get-CRLTimeValidity then checks time until expiration.
+	#> 
+	#[CmdletBinding()]
+
+	Param
+	 (
+	 #CRL File or Raw Bytes - dont limit object
+	 [Parameter(Mandatory = $true, ValueFromPipeline = $true, Position = 0)]
+	 [Alias('Address', 'Addy', 'http')] 
+	$URL
+	 )
+
+	process {
+		#Try to download the CRL file 
+		try {
+		$CRLBytes = Invoke-WebRequest $URL -UseBasicParsing -ErrorAction stop
+		}
+		
+		catch {
+				 # Write-Host "Failed to download the file" -ForegroundColor Red
+				 # Write-Error -Exception $_.exception -Message "Failed to download the file"
+				 # Write-err ("Failed to download the file" -f $_.exception.message)
+				 Return $null
+				 break 
+		}
+
+	 #Call CRL Function
+	 $Response = Get-CRLTimeValidity $CRLBytes.Content
+
+	$Timespan = $Response.NextUpdate - ((Get-Date))
+	 Return $Timespan.Days
+	}
+}
+
+
+$CRLs = @()
+
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 2.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 3.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 11.crl"
+$CRLs += "http://crl.##FQDN##/certificate/##CRLstring## Issuing CA 12.crl"
+
+$strCondition = @()
+$NGCRLOutput = @()
+
+foreach ( $CRL in $CRLs )
+{
+	$SCOMVAR = Get-CRLTimeExpiration $CRL
+	# For Debug, remove comments #
+	#write-host $CRL
+	#write-host $SCOMVAR
+	
+	# Test
+	if ( $SCOMVAR -ne $null)
+		{
+		#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+		#$NGCRLOutput += "Success - $CRL - Number of days = $SCOMVAR"
+		#$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Success - $CRL - Number of days = $SCOMVAR")
+		#$strCondition += "Good"
+		# Debug (uncomment #if, and comment non to debug based on current values
+		$SCOMVAR
+		#if ( $SCOMVAR -gt 136 )
+		if ( $SCOMVAR -gt 60 )
+			{
+			#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+			$NGCRLOutput += "Expiration is greater than 60 days! Success - $CRL - Number of days = $SCOMVAR"
+			$momapi.LogScriptEvent($ScriptName,$EventID,0,"Expiration is greater than 60 days!`n Success - $CRL - Number of days = $SCOMVAR")
+			$strCondition += "Good"
+			}
+		#if ( $( $SCOMVAR -lt 135 ) -AND $( $SCOMVAR -gt 115) )
+		if ( $( $SCOMVAR -lt 60 ) )
+			{
+			#if ( $($SCOMVAR -lt 125 ) -AND $( $SCOMVAR -gt 115) )
+			if ( $( $SCOMVAR -lt 14) )
+				{
+				#write-host -ForegroundColor green "Expiration is less than 30 days before expiring! Success - $CRL - Number of days = $SCOMVAR"
+				$NGCRLOutput += "Expiration is less than 14 days before expiring! $CRL - Number of days = $SCOMVAR"
+				$momapi.LogScriptEvent($ScriptName,$EventID,2,"Expiration is less than 14 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+				$strCondition += "Bad"
+				}
+			if ( $( $SCOMVAR -lt 30 ) -AND $( $SCOMVAR -gt 14) )
+			#if ( $( $SCOMVAR -lt 129 ) -AND $( $SCOMVAR -gt 125) )
+				{
+				#write-host -ForegroundColor green "Expiration is less than 30 days before expiring! Success - $CRL - Number of days = $SCOMVAR"
+				$NGCRLOutput += "Expiration is less than 30 days before expiring! $CRL - Number of days = $SCOMVAR"
+				$momapi.LogScriptEvent($ScriptName,$EventID,1,"Expiration is less than 30 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+				$strCondition = +"Bad"
+				}
+			#write-host -ForegroundColor green "Success - $CRL - Number of days = $SCOMVAR"
+			$NGCRLOutput += "Expiration is less than 60 days before expiring! $CRL - Number of days = $SCOMVAR"
+			$momapi.LogScriptEvent($ScriptName,$EventID,0,"Expiration is less than 60 days before expiring!`n Success - $CRL - Number of days = $SCOMVAR")
+			$strCondition += "Bad"
+			}
+		}
+
+	if ( $SCOMVAR -eq $null )
+	{
+	#write-host -ForegroundColor Red "Failed - $CRL - Number of days = $SCOMVAR"
+	$NGCRLOutput += "NULL URL's provided - CRL $($CRL) and SCOMVar 'Get-CRLTimeExpiration' NULL outputs"
+	$EventID = 589
+	$momapi.LogScriptEvent($ScriptName,$EventID,2,"NULL URL's provided - CRL $($CRL) and SCOMVar 'Get-CRLTimeExpiration' NULL outputs")
+	$strCondition += "Bad"
+	}
+}
+
+$NGCRLOutput = $NGCRLOutput | out-string
+
+# Log 
+$Summary = "$DSMessage `n `n$NGCRLOutput `n `nDisclaimer:  This daily summary report is to document the manual tasks used by NOSC to check AD and AD Replication health, Pending Reboot Report, Logical Disk errors,Expiring Certificates, Unhealthy Server/Agents, Unhealthy agent workflow/script alerts, and Servers in Maintenance Mode"
+
+$EventID
+$strCondition
+
+#Check the value of $strCondition
+if ( $($strCondition -like "Bad").Count -gt 0 )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,1,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+if ( $($strCondition -like "Good").Count -gt 0 )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </WriteAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PSWA" />
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.BaseData</OutputType>
+        <InputType>System!System.BaseData</InputType>
+      </WriteActionModuleType>
+      <WriteActionModuleType ID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.WA" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <xsd:element minOccurs="1" name="TimeoutSeconds" type="xsd:integer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <WriteAction ID="PSWA" TypeID="Windows!Microsoft.Windows.PowerShellWriteAction">
+                <ScriptName>AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.WA.v1015.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script to gather NG AD ADFS WebRequest report data for AD Team
+#
+#  Author: Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+# ScriptName should be the same as the ID of the module that the script is contained in
+$ScriptName = "AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.WA.v1015.ps1"
+$EventID = "596"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+#Set the condition = bad.  This represents your script finding something wrong
+$strCondition = "Bad"
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather Proactive ADFS WebRequest alert check for date ($date).")
+
+$DSMessage = "Proactive DailyTasks ADFS WebRequest alert check for date ($date)."
+
+$ADFSWebRequestTest = @()
+$ADFSServers = @()
+$strCondition  = @()
+
+$ADFSServers += "##ADFSServer1##"
+$ADFSServers += "##ADFSServer2##"
+
+foreach ( $server in $ADFSServers )
+	{
+	#$Request = Invoke-WebRequest -Uri https://1.2.3.4/adfs/ls/idpinitiatedsignon.aspx -Headers @{ host="##FederationFQDN##" }
+	$Request = Invoke-WebRequest -Uri https://$server/adfs/ls/idpinitiatedsignon.aspx -Headers @{ host="##FederationFQDN##" } -UseBasicParsing
+	$Request.BaseResponse.StatusCode
+	#$Request.Content
+	#$Request | Select *
+	$Request.StatusCode
+	$ADFSWebRequestTest += "Test to ($server)"
+	If ( $Request.Content -like "*Sign in to this site.*" -eq $true ) 
+		{
+		Write-host "Test to ($server) sign in successful"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) sign in successful"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in successful")
+		}
+	If ( ( $Request.Content -like "*Sign in to this site.*" -eq $true ) -AND ( $Request.StatusCode -eq "200" ) )
+		{
+		Write-host "Test to ($server) sign in successful, ($server) has http200 status"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) sign in successful, ($server) has http200 status"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in successful, ($server) has http200 status")
+		}
+	else
+		{
+		Write-host "Test to ($server) sign in NOT successful"
+		$strCondition += "Bad"
+		$ADFSWebRequestTest += "Test to ($server) sign in NOT successful"
+		$ADFSWebRequestTest += "----------------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) sign in NOT successful")
+		}
+	If ( $Request.StatusCode -eq "200" )
+		{
+		Write-host "Test to ($server) URI check complete, http200 status"
+		$strCondition += "Good"
+		$ADFSWebRequestTest += "Test to ($server) URI check complete, http200 status"
+		$ADFSWebRequestTest += "----------------------------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) URI check complete, http200 status")
+		}
+	else
+		{
+		Write-host "Test to ($server) URI check FAIL"
+		$strCondition += "Bad"
+		$ADFSWebRequestTest += "Test to ($server) URI check FAIL"
+		$ADFSWebRequestTest += "--------------------------------"
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"Test to ($server) URI check FAIL")
+		}
+	}
+
+$ADFSWebRequestTest
+
+$ADFSWebRequestReport = $ADFSWebRequestTest | out-string
+
+
+# Audit for failures
+if ( $strCondition | ? { $_ -eq "Bad" } )
+	{
+	$strCondition = "Bad"
+	}
+if ( $strCondition | ? { $_ -eq "Good" } )
+	{
+	$strCondition = "Good"
+	}
+
+$strCondition
+
+
+# Log 
+$Summary = "$DSMessage `n `n$ADFSWebRequestReport `n `nDisclaimer:  This daily summary report is to document the manual tasks used by NOSC to check AD and AD Replication health, Pending Reboot Report, Logical Disk errors,Expiring Certificates, Unhealthy Server/Agents, Unhealthy agent workflow/script alerts, and Servers in Maintenance Mode"
+
+$Summary
+
+#Check the value of $strCondition
+if ( $strCondition -eq "Bad" )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+if ( $strCondition -eq "Good" )
+{
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"$DSMessage `n `n$Summary")
+  $bag.AddValue('Result',$strCondition)
+  $bag.AddValue('Message',$DSMessage)
+  $bag.AddValue('Summary',$Summary)
+}
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </WriteAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PSWA" />
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.BaseData</OutputType>
+        <InputType>System!System.BaseData</InputType>
+      </WriteActionModuleType>
+    </ModuleTypes>
+    <MonitorTypes>
+      <UnitMonitorType ID="AD.Applications.CRL.Monitor.MonitorType" Accessibility="Internal">
+        <MonitorTypeStates>
+          <MonitorTypeState ID="GoodCondition" NoDetection="false" />
+          <MonitorTypeState ID="BadCondition" NoDetection="false" />
+        </MonitorTypeStates>
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="0" type="xsd:string" name="SyncTime" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+		  <OverrideableParameter ID="SyncTime" Selector="$Config/SyncTime$" ParameterType="string" />
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <MonitorImplementation>
+          <MemberModules>
+            <DataSource ID="DS" TypeID="AD.Applications.CRL.Monitor.DataSource">
+			  <IntervalSeconds>$Config/IntervalSeconds$</IntervalSeconds>
+			  <SyncTime>$Config/SyncTime$</SyncTime>	
+			  <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+            </DataSource>
+			
+            <ConditionDetection ID="GoodConditionFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='Result']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">GoodCondition</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+            <ConditionDetection ID="BadConditionFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='Result']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">BadCondition</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+          </MemberModules>
+          <RegularDetections>
+            <RegularDetection MonitorTypeStateID="GoodCondition">
+              <Node ID="GoodConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+            <RegularDetection MonitorTypeStateID="BadCondition">
+              <Node ID="BadConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+          </RegularDetections>
+          <OnDemandDetections>
+            <OnDemandDetection MonitorTypeStateID="GoodCondition">
+              <Node ID="GoodConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </OnDemandDetection>
+            <OnDemandDetection MonitorTypeStateID="BadCondition">
+              <Node ID="BadConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </OnDemandDetection>
+          </OnDemandDetections>
+        </MonitorImplementation>
+      </UnitMonitorType>
+      <UnitMonitorType ID="AD.Applications.ADFS.WebRequest.Monitor.MonitorType" Accessibility="Internal">
+        <MonitorTypeStates>
+          <MonitorTypeState ID="GoodCondition" NoDetection="false" />
+          <MonitorTypeState ID="BadCondition" NoDetection="false" />
+        </MonitorTypeStates>
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="0" type="xsd:string" name="SyncTime" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+		  <OverrideableParameter ID="SyncTime" Selector="$Config/SyncTime$" ParameterType="string" />
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <MonitorImplementation>
+          <MemberModules>
+            <DataSource ID="DS" TypeID="AD.Applications.ADFS.WebRequest.Monitor.DataSource">
+			  <IntervalSeconds>$Config/IntervalSeconds$</IntervalSeconds>
+			  <SyncTime>$Config/SyncTime$</SyncTime>	
+			  <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+            </DataSource>			
+            <ConditionDetection ID="GoodConditionFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='Result']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">GoodCondition</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+            <ConditionDetection ID="BadConditionFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='Result']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">BadCondition</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+          </MemberModules>
+          <RegularDetections>
+            <RegularDetection MonitorTypeStateID="GoodCondition">
+              <Node ID="GoodConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+            <RegularDetection MonitorTypeStateID="BadCondition">
+              <Node ID="BadConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+          </RegularDetections>
+          <OnDemandDetections>
+            <OnDemandDetection MonitorTypeStateID="GoodCondition">
+              <Node ID="GoodConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </OnDemandDetection>
+            <OnDemandDetection MonitorTypeStateID="BadCondition">
+              <Node ID="BadConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </OnDemandDetection>
+          </OnDemandDetections>
+        </MonitorImplementation>
+      </UnitMonitorType>
+    </MonitorTypes>
+  </TypeDefinitions>
+  <Monitoring>
+    <Discoveries>
+      <Discovery ID="AD.Applications.Seed.Class.Discovery" Target="Windows!Microsoft.Windows.Server.OperatingSystem" Enabled="true" ConfirmDelivery="false" Remotable="true" Priority="Normal">
+        <Category>Discovery</Category>
+        <DiscoveryTypes>
+          <DiscoveryClass TypeID="AD.Applications.Seed.Class">
+            <Property TypeID="System!System.Entity" PropertyID="DisplayName" />
+          </DiscoveryClass>
+        </DiscoveryTypes>
+        <DataSource ID="DSDiscovery.Seed" TypeID="Windows!Microsoft.Windows.FilteredRegistryDiscoveryProvider">
+          <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+          <RegistryAttributeDefinitions>
+            <RegistryAttributeDefinition>
+              <AttributeName>Search</AttributeName>
+              <Path>SOFTWARE\ADApplications\WatcherNode</Path>
+              <PathType>0</PathType>
+              <AttributeType>0</AttributeType>
+            </RegistryAttributeDefinition>
+          </RegistryAttributeDefinitions>
+          <Frequency>86400</Frequency>
+          <ClassId>$MPElement[Name="AD.Applications.Seed.Class"]$</ClassId>
+          <InstanceSettings>
+            <Settings>
+              <Setting>
+                <Name>$MPElement[Name="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Name>
+                <Value>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Value>
+              </Setting>
+              <Setting>
+                <Name>$MPElement[Name="System!System.Entity"]/DisplayName$</Name>
+                <Value>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Value>
+              </Setting>
+            </Settings>
+          </InstanceSettings>
+          <Expression>
+            <SimpleExpression>
+              <ValueExpression>
+                <XPathQuery Type="String">Values/Search</XPathQuery>
+              </ValueExpression>
+              <Operator>Equal</Operator>
+              <ValueExpression>
+                <Value Type="String">True</Value>
+              </ValueExpression>
+            </SimpleExpression>
+          </Expression>
+        </DataSource>
+      </Discovery>
+    </Discoveries>
+    <Rules>
+      <Rule ID="AD.Applications.CRL.Report.Script.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="AD.Applications.CRL.Report.Script.Alert.Rule.Datasource">
+            <TimeoutSeconds>300</TimeoutSeconds>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="WA" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertMessageId>$MPElement[Name="AD.Applications.CRL.Report.Script.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/Property[@Name='Message']$</AlertParameter1>
+              <AlertParameter2>$Data/Property[@Name='Summary']$</AlertParameter2>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data/Property[@Name='Message']$</SuppressionValue>
+            </Suppression>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.CRL.Report.Script.Task.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">587</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Proactive DailyTasks CRL alert check for date</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.CRL.Report.Script.Task.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.CRL.EventID588.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">588</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Proactive DailyTasks CRL alert check for date </Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.CRL.EventID588.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.CRL.EventID589.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">589</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Failed - http://crl.##FQDN##/certificate/US</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>1</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.CRL.EventID589.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+
+      <Rule ID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.Datasource">
+            <TimeoutSeconds>300</TimeoutSeconds>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="WA" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertMessageId>$MPElement[Name="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/Property[@Name='Message']$</AlertParameter1>
+              <AlertParameter2>$Data/Property[@Name='Summary']$</AlertParameter2>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data/Property[@Name='Message']$</SuppressionValue>
+            </Suppression>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.ADFS.WebRequest.Report.Script.Task.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">596</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Proactive DailyTasks ADFS WebRequest alert check for date </Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.ADFS.WebRequest.Report.Script.Task.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.ADFS.WebRequest.EventID595.Alert.Rule" Enabled="false" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">595</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Proactive DailyTasks ADFS WebRequest alert check for date </Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.ADFS.WebRequest.EventID595.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.ADFS.WebRequest.EventID596.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">596</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Failed - http://crl.##FQDN##/certificate/US</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>1</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.ADFS.WebRequest.EventID596.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="AD.Applications.ADFS.WebRequest.EventID597.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">597</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Proactive DailyTasks ADFS WebRequest alert check for date </Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="AD.Applications.ADFS.WebRequest.EventID597.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+    </Rules>
+    <Tasks>
+      <Task ID="AD.Applications.CRL.Report.Script.Task" Accessibility="Public" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" Timeout="120" Remotable="true">
+        <Category>Custom</Category>
+        <WriteAction ID="PSWA" TypeID="AD.Applications.CRL.Report.Script.Alert.Rule.WA">
+          <TimeoutSeconds>300</TimeoutSeconds>
+        </WriteAction>
+      </Task>
+      <Task ID="AD.Applications.ADFS.WebRequest.Report.Script.Task" Accessibility="Public" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" Timeout="120" Remotable="true">
+        <Category>Custom</Category>
+        <WriteAction ID="PSWA" TypeID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.WA">
+          <TimeoutSeconds>300</TimeoutSeconds>
+        </WriteAction>
+      </Task>
+    </Tasks>
+    <Monitors>
+      <UnitMonitor ID="AD.Applications.CRL.Monitor" Accessibility="Public" Enabled="true" Target="AD.Applications.Seed.Class" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="AD.Applications.CRL.Monitor.MonitorType" ConfirmDelivery="true">
+        <Category>AvailabilityHealth</Category>
+        <AlertSettings AlertMessage="AD.Applications.CRL.Monitor.AlertMessage">
+          <AlertOnState>Warning</AlertOnState>  <!-- Warning or Error should match OperationalStates below  -->
+          <AutoResolve>true</AutoResolve>
+          <AlertPriority>Normal</AlertPriority>
+          <AlertSeverity>MatchMonitorHealth</AlertSeverity>  <!-- Common options for AlertSeverity are MatchMonitorHealth, Information, Warning, Error -->
+          <AlertParameters>
+            <AlertParameter1>$Data/Context/Property[@Name='Result']$</AlertParameter1> <!-- This is an example of passing property output from the script into the alert description -->
+            <AlertParameter2>$Data/Context/Property[@Name='Message']$</AlertParameter2> 
+            <AlertParameter3>$Data/Context/Property[@Name='Summary']$</AlertParameter3>
+          </AlertParameters>
+        </AlertSettings>
+        <OperationalStates>
+          <OperationalState ID="GoodCondition" MonitorTypeStateID="GoodCondition" HealthState="Success" />
+          <OperationalState ID="BadCondition" MonitorTypeStateID="BadCondition" HealthState="Warning" />  <!-- HealthState = Warning or Error -->
+        </OperationalStates>
+        <Configuration>
+          <IntervalSeconds>43100</IntervalSeconds>
+		  <SyncTime>00:03</SyncTime>
+          <TimeoutSeconds>180</TimeoutSeconds>
+        </Configuration>
+      </UnitMonitor>
+      <UnitMonitor ID="AD.Applications.ADFS.WebRequest.Monitor" Accessibility="Public" Enabled="true" Target="AD.Applications.Seed.Class" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="AD.Applications.ADFS.WebRequest.Monitor.MonitorType" ConfirmDelivery="true">
+        <Category>AvailabilityHealth</Category>
+        <AlertSettings AlertMessage="AD.Applications.ADFS.WebRequest.Monitor.AlertMessage">
+          <AlertOnState>Warning</AlertOnState>  <!-- Warning or Error should match OperationalStates below  -->
+          <AutoResolve>true</AutoResolve>
+          <AlertPriority>Normal</AlertPriority>
+          <AlertSeverity>MatchMonitorHealth</AlertSeverity>  <!-- Common options for AlertSeverity are MatchMonitorHealth, Information, Warning, Error -->
+          <AlertParameters>
+            <AlertParameter1>$Data/Context/Property[@Name='Result']$</AlertParameter1> <!-- This is an example of passing property output from the script into the alert description -->
+            <AlertParameter2>$Data/Context/Property[@Name='Message']$</AlertParameter2> 
+            <AlertParameter3>$Data/Context/Property[@Name='Summary']$</AlertParameter3>
+          </AlertParameters>
+        </AlertSettings>
+        <OperationalStates>
+          <OperationalState ID="GoodCondition" MonitorTypeStateID="GoodCondition" HealthState="Success" />
+          <OperationalState ID="BadCondition" MonitorTypeStateID="BadCondition" HealthState="Warning" />  <!-- HealthState = Warning or Error -->
+        </OperationalStates>
+        <Configuration>
+          <IntervalSeconds>3600</IntervalSeconds>
+		  <SyncTime>00:04</SyncTime>
+          <TimeoutSeconds>180</TimeoutSeconds>
+        </Configuration>
+      </UnitMonitor>
+    </Monitors>
+  </Monitoring>
+  <Presentation>
+    <StringResources>
+	  <StringResource ID="AD.Applications.CRL.Monitor.AlertMessage" />
+	  <StringResource ID="AD.Applications.CRL.Report.Script.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.CRL.Report.Script.Task.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.CRL.EventID588.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.CRL.EventID589.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.ADFS.WebRequest.Monitor.AlertMessage" />
+	  <StringResource ID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.ADFS.WebRequest.Report.Script.Task.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.ADFS.WebRequest.EventID595.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.ADFS.WebRequest.EventID596.Alert.Rule.AlertMessage" />
+	  <StringResource ID="AD.Applications.ADFS.WebRequest.EventID597.Alert.Rule.AlertMessage" />
+    </StringResources>
+  </Presentation>
+  <LanguagePacks>
+    <LanguagePack ID="ENU" IsDefault="false">
+      <DisplayStrings>
+        <DisplayString ElementID="AD.Applications.Customizations">
+          <Name>AD Applications Customizations</Name>
+          <Description>
+v1.0.1.5  18 Jul 2023 - Updated reports to informational
+v1.0.1.4  12 Jul 2023 - Disabled 595 alert rule
+v1.0.1.3   6 Apr 2023 - Updated for GMT to EST for datasources
+v1.0.1.1   9 Feb 2022 - Uncommented good section for alert suppression error
+v1.0.0.8   8 Oct 2021 - Updated ADFS and CRL datasources/WA, invoke-webrequest -UseBasicParsing added to both
+v1.0.0.2   5 Oct 2021 - Updated ADFS strCondition
+v1.0.0.1  30 Sep 2021 - Updated Discovery to ADApplications
+v1.0.0.0  29 Sep 2021 - Created AD Applications pack for ADFS and CRL checks</Description>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.Seed.Class">
+          <Name>AD Applications Seed Class</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.Seed.Class.Discovery">
+          <Name>AD Applications Seed Class Discovery</Name>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.CRL.Report.Script.Alert.Rule.Datasource">
+          <Name>AD Applications CRL Report Script Alert Rule Datasource</Name>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.CRL.Report.Script.Alert.Rule.WA">
+          <Name>AD Applications CRL Report Script Alert Rule WA</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.CRL.Report.Script.Alert.Rule">
+          <Name>AD Applications CRL Report Script Alert Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.CRL.Report.Script.Alert.Rule.AlertMessage">
+          <Name>Proactive DailyTasks AD Applications CRL Report Script Alert Rule AlertMessage</Name>
+          <Description>{0}
+
+{1}</Description>
+	    </DisplayString>
+		<DisplayString ElementID="AD.Applications.CRL.Report.Script.Task">
+          <Name>AD Applications CRL Report Script Alert Task</Name>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.CRL.Report.Script.Task.Alert.Rule.AlertMessage">
+          <Name>Proactive DailyTasks AD Applications CRL Report Script Alert Task AlertMessage</Name>
+          <Description>{0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.CRL.EventID588.Alert.Rule.AlertMessage">
+          <Name>DailyTasks AD Applications CRL EventID 588 Alert Task AlertMessage</Name>
+          <Description>DailyTasks AD Applications CRL Monitor: detected an expiring CRL cert that needs new CRL certificate
+		  
+{0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.CRL.EventID589.Alert.Rule.AlertMessage">
+          <Name>DailyTasks AD Applications CRL EventID 589 Alert Task AlertMessage</Name>
+          <Description>DailyTasks AD Applications CRL Monitor: detected an expiring CRL cert that needs new CRL certificate
+
+{0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.EventID595.Alert.Rule.AlertMessage">
+          <Name>DailyTasks AD Applications ADFS WebRequest EventID 595 Alert Task AlertMessage</Name>
+          <Description>DailyTasks AD Applications ADFS WebRequest Monitor: detected a failing web request test to one or more ADFS servers
+		  
+{0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.EventID596.Alert.Rule.AlertMessage">
+          <Name>DailyTasks AD Applications ADFS WebRequest EventID 596 Alert Task AlertMessage</Name>
+          <Description>DailyTasks AD Applications ADFS WebRequest Monitor: detected a failing web request test to one or more ADFS servers
+
+{0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.EventID597.Alert.Rule.AlertMessage">
+          <Name>DailyTasks AD Applications ADFS WebRequest EventID 597 Alert Task AlertMessage</Name>
+          <Description>DailyTasks AD Applications ADFS WebRequest Monitor: detected a failing web request test to one or more ADFS servers
+
+{0}</Description>
+        </DisplayString>
+
+        <DisplayString ElementID="AD.Applications.CRL.Monitor">
+          <Name>AD Applications CRL Monitor</Name>
+          <Description></Description>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.CRL.Monitor" SubElementID="GoodCondition">
+          <Name>Good Condition</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.CRL.Monitor" SubElementID="BadCondition">
+          <Name>Bad Condition</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.CRL.Monitor.AlertMessage">
+          <Name>AD Applications CRL Monitor: CRL's about to expire</Name>
+          <Description>AD Applications CRL Monitor: detected an expiring CRL cert that needs new CRL certificate
+{0}
+{1}
+{2}
+</Description>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.ADFS.WebRequest.Monitor">
+          <Name>AD Applications detected a failed ADFS request to ADFS server Monitor</Name>
+          <Description></Description>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.ADFS.WebRequest.Monitor" SubElementID="GoodCondition">
+          <Name>Good Condition</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.ADFS.WebRequest.Monitor" SubElementID="BadCondition">
+          <Name>Bad Condition</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.ADFS.WebRequest.Monitor.AlertMessage">
+          <Name>AD Applications ADFS WebRequest Monitor: CRL's about to expire</Name>
+          <Description>AD Applications ADFS WebRequest Monitor: detected a failed ADFS request to ADFS server
+{0}
+{1}
+{2}
+</Description>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.Datasource">
+          <Name>AD Applications ADFS WebRequest Report Script Alert Rule Datasource</Name>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.WA">
+          <Name>AD Applications ADFS WebRequest Report Script Alert Rule WA</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule">
+          <Name>AD Applications ADFS WebRequest Report Script Alert Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="AD.Applications.ADFS.WebRequest.Report.Script.Alert.Rule.AlertMessage">
+          <Name>Proactive DailyTasks AD Applications ADFS WebRequest Report Script Alert Rule AlertMessage</Name>
+          <Description>{0}
+
+{1}</Description>
+	    </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.Report.Script.Task">
+          <Name>AD Applications ADFS WebRequest Report Script Alert Task</Name>
+        </DisplayString>
+		<DisplayString ElementID="AD.Applications.ADFS.WebRequest.Report.Script.Task.Alert.Rule.AlertMessage">
+          <Name>Proactive DailyTasks AD Applications ADFS WebRequest Report Script Alert Task AlertMessage</Name>
+          <Description>{0}</Description>
+        </DisplayString>
+      </DisplayStrings>
+      <KnowledgeArticles>
+        <KnowledgeArticle ElementID="AD.Applications.CRL.Monitor" Visible="true">
+          <MamlContent>
+            <section xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns="http://schemas.microsoft.com/maml/2004/10">
+              <maml:title>Summary</maml:title>
+              <maml:para>The NG CRL certificates are about to expire</maml:para>
+            </section>
+            <section xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns="http://schemas.microsoft.com/maml/2004/10">
+              <maml:title>Causes</maml:title>
+              <maml:para>This can happen for a few reasons:</maml:para>
+              <maml:para />
+              <maml:list>
+                <maml:listItem>
+                  <maml:para>CRL certificates must be renewed every 3-4 months</maml:para>
+                </maml:listItem>
+                <maml:listItem>
+                  <maml:para>Check the Operations Manager Event log, for event ID's 586 (daily report), 588, Good certificates, and 589 Expiring certificates to see which CA certificates need to be renewed/replaced</maml:para>
+                </maml:listItem>
+                <maml:listItem>
+                  <maml:para>Alert occurs on daily check</maml:para>
+                </maml:listItem>
+              </maml:list>
+            </section>
+            <section xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns="http://schemas.microsoft.com/maml/2004/10">
+              <maml:title>Resolutions</maml:title>
+              <maml:para>Try the following troubleshooting steps to attempt to fix the problem</maml:para>
+              <maml:para />
+              <maml:list>
+                <maml:listItem>
+                  <maml:para>RDP to affected DC server to restart CRL CA certificate</maml:para>
+                </maml:listItem>
+                <maml:listItem>
+                  <maml:para>Leverage PowerShell (as Admin) to run 'get-service ProVService | start-service' to restart affected service</maml:para>
+                </maml:listItem>
+                <maml:listItem>
+                  <maml:para>Additionally, run 'get-eventlog -LogName "NG AD CRL" -newest 50 to see if the 4402 events subside</maml:para>
+                </maml:listItem>
+                <maml:listItem>
+                  <maml:para>Alternatively, run get-eventlog command above to verify if EventID 4402 Event Description no longer contains:</maml:para>
+                  <maml:para>Inside Event Message 'Provisioner: Could not validate the contents of user logon request context: AS-REQ contains an invalid or unknown username type: 1.'</maml:para>
+                  <maml:para></maml:para>
+                  <maml:para>Command syntax:  'get-eventlog -LogName "NG AD CRL" -newest 50 | ? { $_.Message -like "*Provisioner: Could not validate the contents of user logon request context: AS-REQ contains an invalid or unknown username type: 1*" } </maml:para>
+	            </maml:listItem>
+              </maml:list>
+            </section>
+          </MamlContent>
+        </KnowledgeArticle>
+      </KnowledgeArticles>
+    </LanguagePack>
+  </LanguagePacks>
+</ManagementPack>

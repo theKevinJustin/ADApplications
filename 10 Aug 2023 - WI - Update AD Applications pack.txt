@@ -1,0 +1,17 @@
+#==================================================================
+# AD Applications
+#==================================================================
+
+# Configure ADFS servers and Federation FQDN
+#===========================================
+Find/replace:
+	##FQDN##
+	##CRLstring##
+
+# Configure ADFS servers and Federation FQDN
+#===========================================
+Find/replace:
+	##ADFSServer1##
+	##ADFSServer2##
+	##FederationFQDN##
+
